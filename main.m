@@ -3,15 +3,87 @@
 @interface TimerView : NSView
 @property NSInteger currentSeconds;
 @property NSInteger targetSeconds;
+@property NSString *timerName;
 @property BOOL paused;
 @property NSTimer *timer;
+@property NSMutableArray *sessionLogs; 
 @end
 
 @implementation TimerView
+
+// Central method to append any text line to ~/Documents/TimerLogs.txt
+- (void)appendLogToFile:(NSString *)logMessage
+{
+    NSString *documentsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *filePath = [documentsPath stringByAppendingPathComponent:@"TimerLogs.txt"];
+    
+    NSString *entryWithNewline = [NSString stringWithFormat:@"%@\n", logMessage];
+    NSData *data = [entryWithNewline dataUsingEncoding:NSUTF8StringEncoding];
+    
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    
+    if (![fileManager fileExistsAtPath:filePath]) {
+        [data writeToFile:filePath atomically:YES];
+    } else {
+        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:filePath];
+        [fileHandle seekToEndOfFile];
+        [fileHandle writeData:data];
+        [fileHandle closeFile];
+    }
+}
+
+// Replicates the exact look of macOS NSLog and commits it to the file
+- (void)logLiveEvent:(NSString *)eventDescription
+{
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
+    NSString *dateString = [formatter stringFromDate:[NSDate date]];
+    
+    int pid = [[NSProcessInfo processInfo] processIdentifier];
+    long threadId = (long)[[NSThread currentThread] hash]; // Generates a consistent thread token
+    
+    NSString *formattedLog = [NSString stringWithFormat:@"%@ Timer[%d:%ld] %@", 
+                              dateString, pid, threadId, eventDescription];
+    
+    [self appendLogToFile:formattedLog];
+    printf("%s\n", [formattedLog UTF8String]); // Echo to terminal
+}
+
+- (void)recordSession
+{
+    if (_currentSeconds == 0) return;
+
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+    NSString *dateString = [formatter stringFromDate:[NSDate date]];
+
+    NSString *logEntry = [NSString stringWithFormat:@"📝 SAVED: [%@] [%@] Target: %lds | Actual: %lds", 
+                          dateString,
+                          _timerName,
+                          (long)_targetSeconds, 
+                          (long)_currentSeconds];
+    
+    [_sessionLogs addObject:logEntry];
+    [self appendLogToFile:logEntry];
+    
+    printf("%s\n", [logEntry UTF8String]);
+}
+
+- (void)printFinalLogsAndQuit
+{
+    [self recordSession];
+    
+    printf("\n=== SESSION COMPLETE ===\n");
+    printf("Your logs have been saved to: ~/Documents/TimerLogs.txt\n");
+    printf("========================\n\n");
+    
+    [NSApp terminate:nil];
+}
+
 - (void)mouseDown:(NSEvent *)event
 {
     _paused = !_paused;
-    NSLog(@"Timer %s", _paused ? "PAUSED" : "RUNNING");
+    [self logLiveEvent:_paused ? @"Timer PAUSED" : @"Timer RUNNING"];
     [self setNeedsDisplay:YES];
 }
 
@@ -29,20 +101,26 @@
 
     if (result == NSAlertFirstButtonReturn)
     {
-        [NSApp terminate:nil];
+        [self printFinalLogsAndQuit];
     }
 }
 
-// Updated Initializer to accept the target time
-- (instancetype)initWithFrame:(NSRect)frame target:(NSInteger)target
+- (instancetype)initWithFrame:(NSRect)frame target:(NSInteger)target name:(NSString *)name
 {
     self = [super initWithFrame:frame];
 
     _targetSeconds = target;
-    _currentSeconds = 0; // Start at 0 to count UP
+    _timerName = name;
+    _currentSeconds = 0; 
     _paused = NO;
+    _sessionLogs = [[NSMutableArray alloc] init]; 
     
     self.wantsLayer = YES;
+
+    // Log the startup event directly to the file immediately upon initialization
+    NSString *startLine = [NSString stringWithFormat:@"[%@] Timer", _timerName];
+    [self appendLogToFile:startLine];
+    printf("%s\n", [startLine UTF8String]);
 
     _timer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                               target:self
@@ -60,16 +138,10 @@
 
 - (void)tick
 {
-    // Count UP until we hit the target
-    if (!_paused && _currentSeconds < _targetSeconds)
+    if (!_paused)
     {
         _currentSeconds++;
     }
-
-    NSLog(@"paused=%d elapsed=%ld target=%ld",
-          _paused,
-          (long)_currentSeconds,
-          (long)_targetSeconds);
 
     [self setNeedsDisplay:YES];
 }
@@ -79,7 +151,6 @@
     [[NSColor colorWithWhite:0.95 alpha:1.0] setFill];
     NSRectFill(self.bounds);
 
-    // Calculate minutes and seconds from the elapsed time
     NSInteger min = _currentSeconds / 60;
     NSInteger sec = _currentSeconds % 60;
 
@@ -94,6 +165,9 @@
 
     style.alignment = NSTextAlignmentCenter;
 
+    NSColor *textColor = (_currentSeconds > _targetSeconds) ? 
+                         [NSColor systemRedColor] : [NSColor darkGrayColor];
+
     NSDictionary *attrs =
     @{
         NSFontAttributeName :
@@ -101,7 +175,7 @@
                             size:self.bounds.size.height * 0.55],
 
         NSForegroundColorAttributeName :
-            [NSColor darkGrayColor],
+            textColor,
 
         NSParagraphStyleAttributeName :
             style
@@ -126,13 +200,14 @@
     if ([chars isEqualToString:@" "])
     {
         _paused = !_paused;
-        NSLog(@"Timer %s", _paused ? "PAUSED" : "RUNNING");
+        [self logLiveEvent:_paused ? @"Timer PAUSED" : @"Timer RUNNING"];
     }
     else if ([[chars lowercaseString] isEqualToString:@"r"])
     {
-        // Reset back to 0
+        [self recordSession];
         _currentSeconds = 0;
         _paused = NO;
+        [self logLiveEvent:@"Timer RESET & RESTARTED"];
     }
     else if ([[chars lowercaseString] isEqualToString:@"f"])
     {
@@ -140,9 +215,9 @@
     }
     else if ([[chars lowercaseString] isEqualToString:@"q"])
     {
-        [NSApp terminate:nil];
+        [self printFinalLogsAndQuit];
     }
-    else if (event.keyCode == 53)
+    else if (event.keyCode == 53) 
     {
         if ((self.window.styleMask &
              NSWindowStyleMaskFullScreen) != 0)
@@ -169,17 +244,30 @@ int main(int argc, const char *argv[])
 {
     @autoreleasepool
     {
-        // 1. Prompt the user for input in the terminal
         int inputSeconds = 0;
         printf("Enter timer length (in seconds): ");
         
-        // 2. Read the input with basic validation
         if (scanf("%d", &inputSeconds) != 1 || inputSeconds <= 0) {
             printf("Invalid input. Defaulting to 3600 seconds (1 hour).\n");
             inputSeconds = 3600;
         }
 
-        // 3. Now launch the GUI
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+
+        char nameBuffer[256];
+        printf("Enter timer name (e.g., Work, Break): ");
+        if (fgets(nameBuffer, sizeof(nameBuffer), stdin) != NULL) {
+            nameBuffer[strcspn(nameBuffer, "\n")] = 0; 
+        } else {
+            strcpy(nameBuffer, "Timer");
+        }
+
+        NSString *timerName = [NSString stringWithUTF8String:nameBuffer];
+        if (timerName.length == 0) {
+            timerName = @"Timer";
+        }
+
         [NSApplication sharedApplication];
 
         NSRect frame = NSMakeRect(200, 200, 140, 50);
@@ -192,7 +280,6 @@ int main(int argc, const char *argv[])
                               defer:NO];
 
         [window setLevel:NSStatusWindowLevel];
-
         [window setCollectionBehavior:
              NSWindowCollectionBehaviorCanJoinAllSpaces |
             NSWindowCollectionBehaviorFullScreenAuxiliary];
@@ -203,9 +290,8 @@ int main(int argc, const char *argv[])
         [window setTitleVisibility:NSWindowTitleHidden];
         [window makeKeyAndOrderFront:nil];
 
-        // 4. Pass the user's input into our custom view
         TimerView *view =
-            [[TimerView alloc] initWithFrame:frame target:inputSeconds];
+            [[TimerView alloc] initWithFrame:frame target:inputSeconds name:timerName];
 
         [window setContentView:view];
         [window setOpaque:NO];
